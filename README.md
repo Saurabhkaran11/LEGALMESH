@@ -1,129 +1,55 @@
-# ⚖️ LegalMesh — Multi-Agent Legal Research System
+# LegalMesh
 
-> **Built at LLM × Law Hackathon @ Stanford** | Harvey Track: Justice for the Underserved
+Ask a legal question in plain English and get a cited research summary. Built at the LLM × Law Hackathon at Stanford (April 2026) for the Harvey track, Justice for the Underserved.
 
-LegalMesh is a multi-agent AI system that coordinates **7 specialized legal research agents** across **7 open legal datasets** to answer legal questions in plain English. Agents run in parallel, searching statutes, case law, regulations, and municipal ordinances simultaneously, then synthesize everything into a comprehensive legal analysis.
+This is a legal research tool, not legal advice. Always consult a licensed attorney.
 
-## Architecture
+## How it works
 
-```
-User Question (plain English)
-        │
-        ▼
-┌─────────────────────────┐
-│  Agent 1: FOLIO Legal   │──▶ Classifies domain, jurisdiction, key terms
-│  Classifier (Claude)    │    (18K legal concepts from FOLIO ontology)
-└────────────┬────────────┘
-             │
-    ┌────────┼────────┬──────────┬──────────┐
-    ▼        ▼        ▼          ▼          ▼
-┌────────┐┌────────┐┌─────────┐┌─────────┐┌──────────┐
-│Statute ││Case Law││Trust-   ││Federal  ││Municipal │
-│Search  ││Search  ││Foundry  ││Register ││Law Search│
-│Agent   ││Agent   ││Agent    ││Agent    ││Agent     │
-│        ││        ││         ││         ││          │
-│State   ││6.7M    ││8M+ docs ││1M+ regs ││County/   │
-│laws +  ││cases   ││verified ││& rules  ││city      │
-│US Code ││360 yrs ││legal    ││         ││ordinances│
-└────┬───┘└───┬────┘└────┬────┘└────┬────┘└────┬─────┘
-     │        │          │          │          │
-     └────────┴──────────┴──────────┴──────────┘
-                         │
-                         ▼
-              ┌─────────────────────┐
-              │  Agent 7: Claude    │──▶ Comprehensive legal analysis
-              │  Synthesizer        │    with citations & action steps
-              └─────────────────────┘
-```
+1. A Claude agent classifies the question by legal domain, jurisdiction and key terms.
+2. Four search agents run concurrently. If one source fails, the others continue.
+3. A final Claude agent writes the analysis. It cites only retrieved documents and labels anything from general knowledge.
 
-## Data Sources
+Progress streams to the page over a WebSocket.
 
-| Dataset | Source | Scale |
-|---------|--------|-------|
-| U.S. State Laws | `justicedao/ipfs_state_laws` | 10K-100K rows, 51 jurisdictions |
-| U.S. Code | `justicedao/ipfs_uscode` | 100K-1M rows |
-| Court Rules | `justicedao/ipfs_court_rules` | Per-state procedural rules |
-| Case Law | `justicedao/ipfs_caselaw_access_project` | 1M-10M cases |
-| Case Embeddings | `justicedao/Caselaw_Access_Project_embeddings` | 10M-100M vectors |
-| Federal Register | `justicedao/ipfs_federal_register` | 1M-10M regulations |
-| Municipal Law | `justicedao/american_municipal_law` | County/city ordinances |
-| TrustFoundry | TrustFoundry API | 8M+ verified legal documents |
+| Source | Covers | Key |
+|---|---|---|
+| [eCFR](https://www.ecfr.gov/) | Current federal regulations | None |
+| [Federal Register](https://www.federalregister.gov/) | Federal rules, proposed rules and notices | None |
+| [CourtListener](https://www.courtlistener.com/) | Court opinions | Free token, optional |
+| TrustFoundry | Legal documents | Optional |
 
-## Quick Start (< 10 steps)
+These sources are strongest on federal law. They usually do not include state statutes, and the app says so instead of inventing citations.
 
-### 1. Clone and install
+The original hackathon version searched Hugging Face datasets. Those datasets have since been restructured or closed to search, so this version uses official APIs.
+
+## API keys
+
+Each visitor enters their own keys on the page. Keys are used for one request and are never stored or logged.
+
+The default model is `claude-opus-5-5`. Set the `ANTHROPIC_MODEL` environment variable to change it. Requests use Anthropic's server-side fallback if a model declines.
+
+## Tech stack
+
+Python, FastAPI, asyncio, WebSockets, Anthropic Python SDK, httpx, HTML and JavaScript, pytest
+
+## Run it
+
 ```bash
-cd legalmesh
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
+python -m backend.main        # then open http://127.0.0.1:8000
+python -m pytest              # needs no API keys
 ```
 
-### 2. Set up API keys
-Edit `.env` with your keys:
-```
-ANTHROPIC_API_KEY=sk-ant-...
-HF_TOKEN=hf_...
-TRUSTFOUNDRY_API_KEY=api_...
-```
+## Deploy to Render
 
-### 3. Run the backend
-```bash
-python -m backend.main
-# API running at http://localhost:8000
-```
+Create a new Blueprint on Render and select this repository. It uses `render.yaml` and needs no environment variables.
 
-### 4. Choose your frontend
-
-**Option A — Streamlit** (recommended for demo):
-```bash
-cd frontend_streamlit
-streamlit run app.py
-# UI at http://localhost:8501
-```
-
-**Option B — Gradio** (shareable link):
-```bash
-cd frontend_gradio
-python app.py
-# UI at http://localhost:7860 (+ public share link)
-```
-
-**Option C — React** (polished standalone):
-```bash
-# Just open frontend_react/index.html in a browser
-# (requires backend running on port 8000)
-```
-
-### 5. Ask a question
-Enter any legal question in plain English, e.g.:
-> "My landlord won't return my security deposit after 30 days in California"
-
-Watch all 7 agents work in parallel and receive a comprehensive legal analysis.
-
-## API Endpoints
+## API
 
 | Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/` | Service info and available agents |
+|---|---|---|
+| `GET` | `/` | The web page |
 | `GET` | `/api/health` | Health check |
-| `POST` | `/api/query` | Submit legal research query |
-| `WS` | `/ws/query` | WebSocket for real-time agent updates |
-
-## Example API Call
-```bash
-curl -X POST http://localhost:8000/api/query \
-  -H "Content-Type: application/json" \
-  -d '{"query": "What are my rights if my employer withholds overtime pay in Texas?"}'
-```
-
-## Hackathon Tracks
-
-- **Harvey**: Justice for the Underserved — Multi-step workflow agents
-- **Thenvoi** ($1000): Modular agent orchestration (Thenvoi-ready design)
-
-## Disclaimer
-
-This is a legal research tool, NOT legal advice. Always consult a licensed attorney.
-
-## Team
-
-Built by Karan at LLM × Law Hackathon, Stanford, April 2026.
+| `POST` | `/api/query` | Run a query with `query` and `anthropic_key` |
+| `WS` | `/ws/query` | The same query with live agent updates |

@@ -1,28 +1,7 @@
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
-
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-HF_TOKEN = os.getenv("HF_TOKEN")
-TRUSTFOUNDRY_API_KEY = os.getenv("TRUSTFOUNDRY_API_KEY")
-THENVOI_API_KEY = os.getenv("THENVOI_API_KEY")
-
-# HuggingFace dataset IDs
-DATASETS = {
-    "state_laws": "justicedao/ipfs_state_laws",
-    "uscode": "justicedao/ipfs_uscode",
-    "federal_register": "justicedao/ipfs_federal_register",
-    "court_rules": "justicedao/ipfs_court_rules",
-    "caselaw": "justicedao/ipfs_caselaw_access_project",
-    "caselaw_embeddings": "justicedao/Caselaw_Access_Project_embeddings",
-    "municipal_law": "justicedao/american_municipal_law",
-}
-
 # TrustFoundry
 TRUSTFOUNDRY_BASE_URL = "https://api.trustfoundry.ai"
 
-# Legal domain taxonomy (subset of FOLIO's 18K concepts)
+# Legal domains the classifier can choose from, with example topics
 LEGAL_DOMAINS = {
     "employment": ["wages", "overtime", "discrimination", "wrongful termination", "harassment", "FMLA", "workers compensation"],
     "housing": ["landlord", "tenant", "eviction", "lease", "security deposit", "habitability", "rent"],

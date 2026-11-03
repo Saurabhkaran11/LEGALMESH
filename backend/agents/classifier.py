@@ -1,13 +1,13 @@
 """
 Agent 1: Legal Domain Classifier
-Uses FOLIO taxonomy concepts + Claude to classify the user's legal question
-into domain, jurisdiction, and key legal concepts.
+Uses Claude to classify the user's legal question into a domain,
+jurisdiction, and key legal terms.
 """
 
-import anthropic
-from backend.config import ANTHROPIC_API_KEY, LEGAL_DOMAINS, US_STATES
+import json
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+from backend.config import LEGAL_DOMAINS, US_STATES
+from backend.llm import ask
 
 CLASSIFIER_PROMPT = """You are a legal domain classifier. Given a user's legal question, extract:
 
@@ -28,47 +28,34 @@ Respond ONLY in valid JSON format:
 """
 
 
-async def classify_legal_query(query: str) -> dict:
-    """Classify a user's legal question into structured legal metadata."""
+async def classify_legal_query(client, query: str) -> dict:
+    """Classify a user's legal question. API errors propagate so the caller can report them."""
+    response_text = await ask(client, f"{CLASSIFIER_PROMPT}\n\nUser's question: {query}", effort="low", max_tokens=4000)
+    if "```json" in response_text:
+        response_text = response_text.split("```json")[1].split("```")[0]
+    elif "```" in response_text:
+        response_text = response_text.split("```")[1].split("```")[0]
+
     try:
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=500,
-            messages=[
-                {"role": "user", "content": f"{CLASSIFIER_PROMPT}\n\nUser's question: {query}"}
-            ],
-        )
-        import json
-        response_text = message.content[0].text
-        # Extract JSON from response
-        if "```json" in response_text:
-            response_text = response_text.split("```json")[1].split("```")[0]
-        elif "```" in response_text:
-            response_text = response_text.split("```")[1].split("```")[0]
-
         result = json.loads(response_text.strip())
-
-        # Validate domain
-        if result.get("domain") not in LEGAL_DOMAINS:
-            result["domain"] = "consumer"  # fallback
-
-        # Validate state
-        state = result.get("jurisdiction_state", "federal")
-        if state not in US_STATES and state != "federal":
-            result["jurisdiction_state"] = "federal"
-
-        result["agent"] = "classifier"
-        result["status"] = "success"
-        return result
-
-    except Exception as e:
+        if not isinstance(result, dict):
+            raise ValueError("not an object")
+    except ValueError:
         return {
             "agent": "classifier",
-            "status": "error",
-            "error": str(e),
+            "status": "fallback",
             "domain": "consumer",
             "sub_domains": [],
             "jurisdiction_state": "federal",
             "key_terms": query.split()[:5],
             "summary": query,
         }
+
+    if result.get("domain") not in LEGAL_DOMAINS:
+        result["domain"] = "consumer"
+    state = result.get("jurisdiction_state", "federal")
+    if state not in US_STATES and state != "federal":
+        result["jurisdiction_state"] = "federal"
+    result["agent"] = "classifier"
+    result["status"] = "success"
+    return result

@@ -5,10 +5,10 @@ Provides verified legal context with citations.
 """
 
 import httpx
-from backend.config import TRUSTFOUNDRY_API_KEY, TRUSTFOUNDRY_BASE_URL
+from backend.config import TRUSTFOUNDRY_BASE_URL
 
 
-async def search_trustfoundry(classification: dict) -> dict:
+async def search_trustfoundry(classification: dict, api_key=None) -> dict:
     """Search TrustFoundry's legal database for relevant documents."""
     results = {
         "agent": "trustfoundry",
@@ -16,11 +16,11 @@ async def search_trustfoundry(classification: dict) -> dict:
         "documents": [],
     }
 
-    if not TRUSTFOUNDRY_API_KEY:
+    if not api_key:
         return {
             "agent": "trustfoundry",
             "status": "skipped",
-            "reason": "No TrustFoundry API key configured",
+            "reason": "No TrustFoundry key added",
             "documents": [],
         }
 
@@ -37,7 +37,7 @@ async def search_trustfoundry(classification: dict) -> dict:
             resp = await client.post(
                 f"{TRUSTFOUNDRY_BASE_URL}/v1/search",
                 headers={
-                    "Authorization": f"Bearer {TRUSTFOUNDRY_API_KEY}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
                 json={
@@ -54,39 +54,34 @@ async def search_trustfoundry(classification: dict) -> dict:
                 for doc in docs[:7]:
                     results["documents"].append({
                         "title": doc.get("title", doc.get("name", "Untitled")),
-                        "type": doc.get("type", doc.get("doc_type", "unknown")),
                         "citation": doc.get("citation", ""),
-                        "jurisdiction": doc.get("jurisdiction", state),
-                        "text_preview": str(doc.get("text", doc.get("content", doc.get("snippet", ""))))[:500],
+                        "date": "",
+                        "text": str(doc.get("text", doc.get("content", doc.get("snippet", ""))))[:500],
                         "url": doc.get("url", ""),
-                        "relevance_score": doc.get("score", doc.get("relevance", 0)),
-                        "source": "TrustFoundry API",
+                        "source": "TrustFoundry",
                     })
             elif resp.status_code == 401:
                 results["status"] = "auth_error"
-                results["error"] = "Invalid TrustFoundry API key"
             else:
                 # Try alternative endpoint format
                 resp2 = await client.get(
                     f"{TRUSTFOUNDRY_BASE_URL}/search",
                     params={"q": search_query, "limit": 10},
-                    headers={"Authorization": f"Bearer {TRUSTFOUNDRY_API_KEY}"},
+                    headers={"Authorization": f"Bearer {api_key}"},
                 )
                 if resp2.status_code == 200:
                     data = resp2.json()
                     for doc in data.get("results", [])[:7]:
                         results["documents"].append({
                             "title": doc.get("title", "Untitled"),
-                            "text_preview": str(doc.get("text", ""))[:500],
-                            "source": "TrustFoundry API",
+                            "text": str(doc.get("text", ""))[:500],
+                            "source": "TrustFoundry",
                         })
                 else:
                     results["status"] = "api_error"
-                    results["error"] = f"HTTP {resp.status_code}"
 
-        except Exception as e:
+        except Exception:
             results["status"] = "error"
-            results["error"] = str(e)
 
     if not results["documents"] and results["status"] == "success":
         results["status"] = "no_results"

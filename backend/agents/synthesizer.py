@@ -5,10 +5,8 @@ structured legal research summary using Claude.
 """
 
 import json
-import anthropic
-from backend.config import ANTHROPIC_API_KEY
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+from backend.llm import ask
 
 SYNTHESIZER_PROMPT = """You are a legal research synthesizer. You have received research results from multiple specialized legal agents. Your job is to produce a comprehensive, structured legal analysis.
 
@@ -23,125 +21,37 @@ Given the user's original question and the research results below, produce a str
 5. **Action Steps**: Practical next steps the person can take (filing deadlines, required forms, where to seek help)
 6. **Important Disclaimers**: Note that this is legal research, not legal advice
 
-Format your response in clean markdown. Cite specific statutes and cases where available.
-If the research returned limited results, acknowledge that and suggest additional resources.
+Format your response in clean markdown.
+
+Citation rules:
+- Cite only the retrieved documents listed below, using their titles, citations and links.
+- The retrieved sources cover federal regulations, the Federal Register, and sometimes case law. They usually do not include state statutes.
+- You may explain well-known law from your general knowledge, but label it "From general knowledge, not retrieved here" and tell the reader to verify it.
+- Never invent a case name, statute number, citation or link. If the documents do not answer the question, say so plainly and suggest where to look.
 """
 
 
-async def synthesize_results(
-    query: str,
-    classification: dict,
-    statute_results: dict,
-    case_results: dict,
-    trustfoundry_results: dict,
-    federal_register_results: dict = None,
-    municipal_results: dict = None,
-) -> dict:
-    """Synthesize all agent results into a comprehensive legal analysis."""
+async def synthesize_results(client, query: str, classification: dict, searches: list) -> dict:
+    """Write the analysis from whatever the search agents found."""
+    documents = [doc for search in searches for doc in search.get("documents", [])]
+    context = "\n".join(
+        f"- [{doc.get('source', '')}] {doc.get('title', '')} ({doc.get('citation') or 'no citation'}, {doc.get('date') or 'no date'})"
+        f"\n  {doc.get('text', '')}\n  {doc.get('url', '')}"
+        for doc in documents
+    ) or "No documents were retrieved."
 
-    # Build context from all agents
-    context_parts = []
-
-    context_parts.append(f"## Classification\n{json.dumps(classification, indent=2)}")
-
-    # Statutes
-    if statute_results.get("state_laws"):
-        context_parts.append("## State Laws Found")
-        for law in statute_results["state_laws"]:
-            context_parts.append(f"- **{law['title']}** ({law.get('state', 'Unknown state')}): {law['text']}")
-
-    if statute_results.get("federal_statutes"):
-        context_parts.append("## Federal Statutes Found")
-        for statute in statute_results["federal_statutes"]:
-            context_parts.append(f"- **{statute['title']}**: {statute['text']}")
-
-    if statute_results.get("court_rules"):
-        context_parts.append("## Court Rules Found")
-        for rule in statute_results["court_rules"]:
-            context_parts.append(f"- **{rule['title']}**: {rule['text']}")
-
-    # Case law
-    if case_results.get("cases"):
-        context_parts.append("## Case Law Found")
-        for case in case_results["cases"]:
-            context_parts.append(
-                f"- **{case['case_name']}** ({case.get('date', 'Unknown date')}, {case.get('court', 'Unknown court')})"
-                f"\n  Citation: {case.get('citation', 'N/A')}"
-                f"\n  Preview: {case['text_preview']}"
-            )
-
-    # TrustFoundry
-    if trustfoundry_results.get("documents"):
-        context_parts.append("## TrustFoundry Verified Legal Documents")
-        for doc in trustfoundry_results["documents"]:
-            context_parts.append(
-                f"- **{doc['title']}** (Type: {doc.get('type', 'unknown')}, "
-                f"Citation: {doc.get('citation', 'N/A')}): {doc['text_preview']}"
-            )
-
-    # Federal Register
-    if federal_register_results and federal_register_results.get("regulations"):
-        context_parts.append("## Federal Register Regulations")
-        for reg in federal_register_results["regulations"]:
-            context_parts.append(f"- **{reg['title']}**: {reg['text']}")
-
-    # Municipal law
-    if municipal_results and municipal_results.get("ordinances"):
-        context_parts.append("## Municipal/Local Ordinances")
-        for ord in municipal_results["ordinances"]:
-            context_parts.append(f"- **{ord['title']}** ({ord.get('location', '')}): {ord['text']}")
-
-    research_context = "\n\n".join(context_parts)
-
-    try:
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2000,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        f"{SYNTHESIZER_PROMPT}\n\n"
-                        f"## User's Original Question\n{query}\n\n"
-                        f"## Research Results from Legal Agents\n{research_context}"
-                    ),
-                }
-            ],
-        )
-
-        synthesis = message.content[0].text
-
-        # Count sources
-        source_count = (
-            len(statute_results.get("state_laws", []))
-            + len(statute_results.get("federal_statutes", []))
-            + len(statute_results.get("court_rules", []))
-            + len(case_results.get("cases", []))
-            + len(trustfoundry_results.get("documents", []))
-            + len((federal_register_results or {}).get("regulations", []))
-            + len((municipal_results or {}).get("ordinances", []))
-        )
-
-        return {
-            "agent": "synthesizer",
-            "status": "success",
-            "synthesis": synthesis,
-            "sources_consulted": source_count,
-            "agents_used": [
-                "classifier",
-                "statute_search",
-                "case_search",
-                "trustfoundry" if trustfoundry_results.get("documents") else None,
-                "federal_register" if federal_register_results else None,
-                "municipal_law" if municipal_results else None,
-            ],
-            "classification": classification,
-        }
-
-    except Exception as e:
-        return {
-            "agent": "synthesizer",
-            "status": "error",
-            "error": str(e),
-            "synthesis": "Error generating synthesis. Raw results are still available above.",
-        }
+    synthesis = await ask(
+        client,
+        f"{SYNTHESIZER_PROMPT}\n\n## User's Original Question\n{query}\n\n"
+        f"## Classification\n{json.dumps(classification, indent=2)}\n\n## Retrieved Documents\n{context}",
+        effort="medium",
+        max_tokens=16000,
+    )
+    return {
+        "agent": "synthesizer",
+        "status": "success",
+        "synthesis": synthesis,
+        "sources_consulted": len(documents),
+        "agents_used": ["classifier"] + [s["agent"] for s in searches if s.get("documents")] + ["synthesizer"],
+        "classification": classification,
+    }

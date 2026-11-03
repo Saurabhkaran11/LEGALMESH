@@ -1,98 +1,80 @@
 """
-LegalMesh - Multi-Agent Legal Research System
-FastAPI Backend
+LegalMesh - multi-agent legal research.
 
-Coordinates 5+ MCP agents across 7 legal datasets to answer legal questions:
-- FOLIO Legal Classifier (18K legal concepts)
-- Statute Search (state laws + US Code + court rules)
-- Case Law Search (6.7M cases, 360 years)
-- TrustFoundry (8M+ verified legal documents)
-- Federal Register Scanner (1M+ regulations)
-- Municipal Law Search (county/city ordinances)
-- Claude Synthesizer (produces final analysis)
+A Claude agent classifies the question, 4 search agents run concurrently across
+official legal sources, and a final Claude agent writes the cited analysis.
+Each visitor supplies their own API keys. Keys are used for one request and are
+never stored or logged.
 """
 
-import asyncio
 import json
+import re
+from pathlib import Path
+from typing import Optional
+
+import anthropic
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field, ValidationError
 
 from backend.agents.orchestrator import AgentOrchestrator
+from backend.llm import Keys, RefusedError
 
-app = FastAPI(
-    title="LegalMesh",
-    description="Multi-Agent Legal Research System — Hackathon @ Stanford LLM x Law",
-    version="1.0.0",
-)
+PAGE = Path(__file__).resolve().parent.parent / "frontend_react" / "index.html"
+ANTHROPIC_KEY = re.compile(r"^sk-ant-[A-Za-z0-9_-]{20,300}$")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="LegalMesh", description="Multi-agent legal research", version="2.0.0", docs_url=None, redoc_url=None, openapi_url=None)
 
 
 class QueryRequest(BaseModel):
-    query: str
+    query: str = Field(min_length=1, max_length=2000)
+    anthropic_key: str = Field(default="", max_length=400)
+    courtlistener_token: Optional[str] = Field(default=None, max_length=400)
+    trustfoundry_key: Optional[str] = Field(default=None, max_length=400)
+
+    def __repr__(self) -> str:
+        return "QueryRequest(<hidden>)"
+
+    __str__ = __repr__
 
 
-class QueryResponse(BaseModel):
-    query: str
-    synthesis: str
-    sources_consulted: int
-    agents_used: list
-    total_time_seconds: float
-    classification: dict
-    raw_results: dict
+class ApiProblem(Exception):
+    def __init__(self, status: int, message: str):
+        self.status = status
+        self.message = message
 
 
-@app.get("/")
-async def root():
-    return {
-        "name": "LegalMesh",
-        "description": "Multi-Agent Legal Research System",
-        "version": "1.0.0",
-        "agents": [
-            "FOLIO Legal Classifier",
-            "Statute Search (HuggingFace: state laws, US Code, court rules)",
-            "Case Law Search (HuggingFace: Caselaw Access Project)",
-            "TrustFoundry (8M+ legal documents)",
-            "Federal Register Scanner",
-            "Municipal Law Search",
-            "Claude Synthesizer",
-        ],
-        "datasets": [
-            "justicedao/ipfs_state_laws",
-            "justicedao/ipfs_uscode",
-            "justicedao/ipfs_court_rules",
-            "justicedao/ipfs_caselaw_access_project",
-            "justicedao/ipfs_federal_register",
-            "justicedao/american_municipal_law",
-            "justicedao/Caselaw_Access_Project_embeddings",
-        ],
-        "endpoints": {
-            "POST /api/query": "Submit a legal research query",
-            "WS /ws/query": "WebSocket for real-time agent status updates",
-            "GET /api/health": "Health check",
-        },
-    }
+def keys_from(request: QueryRequest) -> Keys:
+    key = request.anthropic_key.strip()
+    if not key:
+        raise ApiProblem(400, "Add your Anthropic API key.")
+    if not ANTHROPIC_KEY.match(key):
+        raise ApiProblem(400, "That does not look like an Anthropic API key. Keys start with sk-ant-.")
+    return Keys(
+        anthropic=key,
+        courtlistener=(request.courtlistener_token or "").strip() or None,
+        trustfoundry=(request.trustfoundry_key or "").strip() or None,
+    )
 
 
-@app.get("/api/health")
-async def health():
-    return {"status": "ok", "agents": 7, "datasets": 7}
+def problem_from(error: Exception) -> ApiProblem:
+    """Turn a failure into a message that is safe to show. Original errors can quote request details."""
+    if isinstance(error, ApiProblem):
+        return error
+    if isinstance(error, anthropic.AuthenticationError):
+        return ApiProblem(401, "Anthropic rejected that key. Check it and try again.")
+    if isinstance(error, anthropic.PermissionDeniedError):
+        return ApiProblem(403, "That key does not have access to this model.")
+    if isinstance(error, anthropic.RateLimitError):
+        return ApiProblem(429, "Your Anthropic account is over its rate limit. Try again shortly.")
+    if isinstance(error, anthropic.APIStatusError) and error.status_code == 402:
+        return ApiProblem(402, "Your Anthropic account is out of credit.")
+    if isinstance(error, RefusedError):
+        return ApiProblem(422, "Claude declined to answer this question. Try rewording it.")
+    return ApiProblem(502, "Could not complete the research. Try again.")
 
 
-@app.post("/api/query")
-async def query_legal(request: QueryRequest):
-    """Submit a legal research query. All agents run in parallel."""
-    orchestrator = AgentOrchestrator()
-    result = await orchestrator.research(request.query)
-
+def result_payload(result: dict) -> dict:
     return {
         "query": result["query"],
         "synthesis": result["synthesis"].get("synthesis", ""),
@@ -100,59 +82,60 @@ async def query_legal(request: QueryRequest):
         "agents_used": [a for a in result["synthesis"].get("agents_used", []) if a],
         "total_time_seconds": result["total_time_seconds"],
         "classification": result["classification"],
-        "raw_results": {
-            "statutes": result["statute_results"],
-            "cases": result["case_results"],
-            "trustfoundry": result["trustfoundry_results"],
-            "federal_register": result["federal_register_results"],
-            "municipal": result["municipal_results"],
-        },
-        "agent_statuses": result["agent_statuses"],
     }
+
+
+@app.get("/", include_in_schema=False)
+async def page():
+    return FileResponse(PAGE, media_type="text/html")
+
+
+@app.get("/api/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.post("/api/query")
+async def query_legal(request: QueryRequest):
+    """Submit a legal research query. Search agents run concurrently."""
+    try:
+        keys = keys_from(request)
+        result = await AgentOrchestrator().research(request.query.strip(), keys)
+    except Exception as error:
+        problem = problem_from(error)
+        return JSONResponse(status_code=problem.status, content={"error": problem.message})
+    return {**result_payload(result), "agent_statuses": result["agent_statuses"]}
 
 
 @app.websocket("/ws/query")
 async def websocket_query(websocket: WebSocket):
-    """WebSocket endpoint for real-time agent status updates during research."""
+    """Same as POST /api/query, with live agent status updates."""
     await websocket.accept()
+
+    async def send_status(agent_name, status, detail, elapsed):
+        await websocket.send_json({"type": "agent_status", "agent": agent_name, "status": status, "detail": detail, "elapsed_ms": int(elapsed * 1000)})
+
     try:
         while True:
-            data = await websocket.receive_text()
-            request = json.loads(data)
-            query = request.get("query", "")
-
-            if not query:
-                await websocket.send_json({"error": "No query provided"})
+            raw = await websocket.receive_text()
+            try:
+                request = QueryRequest(**json.loads(raw))
+            except (ValueError, TypeError, ValidationError):
+                await websocket.send_json({"type": "error", "error": "Enter a question of up to 2,000 characters."})
                 continue
-
-            # Create orchestrator with WebSocket status callback
-            async def send_status(agent_name, status, detail, elapsed):
-                await websocket.send_json({
-                    "type": "agent_status",
-                    "agent": agent_name,
-                    "status": status,
-                    "detail": detail,
-                    "elapsed_ms": int(elapsed * 1000),
-                })
-
-            orchestrator = AgentOrchestrator(on_status_update=send_status)
-            result = await orchestrator.research(query)
-
-            # Send final result
-            await websocket.send_json({
-                "type": "result",
-                "query": result["query"],
-                "synthesis": result["synthesis"].get("synthesis", ""),
-                "sources_consulted": result["synthesis"].get("sources_consulted", 0),
-                "agents_used": [a for a in result["synthesis"].get("agents_used", []) if a],
-                "total_time_seconds": result["total_time_seconds"],
-                "classification": result["classification"],
-            })
-
+            try:
+                keys = keys_from(request)
+                result = await AgentOrchestrator(on_status_update=send_status).research(request.query.strip(), keys)
+                await websocket.send_json({"type": "result", **result_payload(result)})
+            except WebSocketDisconnect:
+                raise
+            except Exception as error:
+                await websocket.send_json({"type": "error", "error": problem_from(error).message})
     except WebSocketDisconnect:
         pass
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=True)
+
+    uvicorn.run("backend.main:app", host="127.0.0.1", port=8000)
