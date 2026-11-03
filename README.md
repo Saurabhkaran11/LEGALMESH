@@ -21,7 +21,7 @@ Progress streams to the page over a WebSocket.
 
 These sources are strongest on federal law. They usually do not include state statutes, and the app says so instead of inventing citations.
 
-The original hackathon version searched Hugging Face datasets. Those datasets have since been restructured or closed to search, so this version uses official APIs.
+**Hackathon version:** the version built at Stanford ran 5 search agents across 7 legal data sources, using Hugging Face datasets and TrustFoundry. Those datasets have since been restructured or closed to search, so this version runs 4 search agents on official APIs. The original is in this repo's Git history, at commit `b473787`.
 
 ## API keys
 
